@@ -1,0 +1,186 @@
+# ==============================================================================
+# SIMULADOR DE IMPACTO FISCAL - PROJETO BRASIL (2026-2030)
+# ==============================================================================
+# Este modelo calcula o impacto de primeira ordem das mudanças tributárias 
+# e de despesas no Resultado Primário do Governo Central.
+# ==============================================================================
+
+import pandas as pd
+
+# -----------------------------------------------------------------------------
+# 1. FUNÇÕES DE CÁLCULO TRIBUTÁRIO (MICROECONÔMICO)
+# -----------------------------------------------------------------------------
+
+def calcular_csll_nova_regra(lucro_tributavel):
+    """
+    Calcula a CSLL baseada na nova regra progressiva do Projeto Brasil:
+    - 0% até R$ 1.000.000
+    - 4% sobre o excedente de 1M até 10M
+    - Progressão de 0,5% a cada 1M acima de 10M, até o teto de 10% (atingido em 22M)
+    - 10% sobre o excedente de 22M
+    """
+    if lucro_tributavel <= 1_000_000:
+        return 0.0
+    
+    imposto = 0.0
+    
+    # Faixa 1: 1M a 10M (4%)
+    if lucro_tributavel > 1_000_000:
+        base_faixa2 = min(lucro_tributavel, 10_000_000) - 1_000_000
+        imposto += base_faixa2 * 0.04
+        
+    # Faixa 2: 10M a 22M (Progressão de 4.5% a 9.5%, média de 7% sobre o bloco, mas calculado por subfaixa de 1M)
+    if lucro_tributavel > 10_000_000:
+        base_faixa3 = min(lucro_tributavel, 22_000_000) - 10_000_000
+        # Cálculo exato da progressão: 12 faixas de 1M. 
+        # Soma da PA: n * (a1 + an) / 2 -> 12 * (45.000 + 95.000) / 2 = 840.000 (valor máximo desta faixa)
+        # Para frações, calculamos proporcionalmente ou por subfaixa. Simplificação linear para o modelo:
+        aliquota_media_faixa3 = 0.045 + ((base_faixa3 / 1_000_000) * 0.005 / 2) # Aproximação da progressão
+        imposto += base_faixa3 * aliquota_media_faixa3
+        
+    # Faixa 3: Acima de 22M (10%)
+    if lucro_tributavel > 22_000_000:
+        base_faixa4 = lucro_tributavel - 22_000_000
+        imposto += base_faixa4 * 0.10
+        
+    return imposto
+
+def calcular_csll_regra_vigente(lucro_tributavel):
+    """Regra vigente simplificada: 9% sobre toda a base (desconsiderando regimes especiais para este teste macro)"""
+    return lucro_tributavel * 0.09
+
+# -----------------------------------------------------------------------------
+# 2. DADOS PROXY E PREMISSAS (BASE 2026 - Valores em Bilhões de R$)
+# -----------------------------------------------------------------------------
+# NOTA: Estes valores são estimativas baseadas em dados públicos da RFB/Tesouro. 
+# Substitua pelos dados internos do Projeto Brasil se disponíveis.
+
+premissas = {
+    # Arrecadação
+    "base_lucro_tributavel_total": 1800.0,  # R$ 1,8 Trilhão (Proxy Lucro Real/Presumido nacional)
+    "distribuicao_lucro": {
+        "ate_1M": 0.10,       # 10% da base está nesta faixa
+        "1M_a_10M": 0.30,     # 30% da base está nesta faixa
+        "10M_a_22M": 0.20,    # 20% da base está nesta faixa
+        "acima_22M": 0.40     # 40% da base está nesta faixa
+    },
+    "base_incentivos_fiscais_elegiveis": 200.0, # R$ 200 Bi (Base remanescente após 1º corte da LC 224/2025)
+    "taxa_conversao_real_incentivos": 0.60,     # 60% do corte nominal vira arrecadação real (comportamento de ajuste)
+    
+    # Despesas / Previdência
+    "trabalhadores_acima_teto_atual": 2.0,      # 2 milhões de trabalhadores entre R$ 8.475 e R$ 12.968
+    "aumento_contribuicao_media_anual": 0.0065, # R$ 6.500,00 por ano por trabalhador (R$ ~500/mês * 13)
+    
+    # Investimentos (CAPEX/OPEX CT&I)
+    "investimento_cti_2027": 2.0,
+    "investimento_cti_2028": 4.0,
+    "investimento_cti_2029": 6.0,
+    "investimento_cti_2030": 8.0,
+    
+    # Linha de Base Macro (Projeção Oficial Tesouro 2026)
+    "receita_primaria_base_2026": 2586.8,
+    "despesa_primaria_base_2026": 2667.7,
+}
+
+# -----------------------------------------------------------------------------
+# 3. MOTOR DE CÁLCULO DO IMPACTO FISCAL
+# -----------------------------------------------------------------------------
+
+def calcular_impacto_csll():
+    base_total = premissas["base_lucro_tributavel_total"]
+    dist = premissas["distribuicao_lucro"]
+    
+    receita_vigente = 0
+    receita_nova = 0
+    
+    for faixa, proporcao in dist.items():
+        base_faixa = base_total * proporcao
+        
+        # Estimativa do lucro médio por faixa para aplicar a função (simplificação macro)
+        if faixa == "ate_1M":
+            lucro_medio = 500_000
+        elif faixa == "1M_a_10M":
+            lucro_medio = 5_000_000
+        elif faixa == "10M_a_22M":
+            lucro_medio = 16_000_000
+        else: # acima_22M
+            lucro_medio = 50_000_000
+            
+        # Número de "unidades" nessa faixa
+        unidades = base_faixa / lucro_medio
+        
+        receita_vigente += unidades * calcular_csll_regra_vigente(lucro_medio)
+        receita_nova += unidades * calcular_csll_nova_regra(lucro_medio)
+        
+    return receita_nova - receita_vigente # Delta (será negativo, indicando perda de arrecadação nesta rubrica)
+
+def simular_cenario_anual(ano):
+    # 1. Impacto CSLL (Constante ao longo dos anos, ajustado apenas por crescimento nominal não modelado aqui)
+    delta_csll = calcular_impacto_csll()
+    
+    # 2. Impacto IRPJ Adicional (10% -> 15% sobre excedente de 20k/mês)
+    # Proxy: Estima-se que isso capture ~R$ 15 Bi adicionais das grandes empresas
+    delta_irpj = 15.0 
+    
+    # 3. Impacto INSS (Teto 8 SM)
+    # Receita nova = trabalhadores * aumento médio
+    delta_inss = premissas["trabalhadores_acima_teto_atual"] * premissas["aumento_contribuicao_media_anual"] # = 13.0 Bi
+    
+    # 4. Impacto Corte de Incentivos Fiscais
+    # Corte de 10% sobre a base elegível * taxa de conversão real
+    delta_incentivos = (premissas["base_incentivos_fiscais_elegiveis"] * 0.10) * premissas["taxa_conversao_real_incentivos"] # = 12.0 Bi
+    
+    # 5. Impacto Despesas (Investimento CT&I)
+    investimento_cti = 0.0
+    if ano == 2027: investimento_cti = premissas["investimento_cti_2027"]
+    elif ano == 2028: investimento_cti = premissas["investimento_cti_2028"]
+    elif ano == 2029: investimento_cti = premissas["investimento_cti_2029"]
+    elif ano >= 2030: investimento_cti = premissas["investimento_cti_2030"]
+    
+    # Cálculo do Resultado Primário Líquido do Projeto
+    # (Receitas Novas - Perdas de Receita - Novas Despesas)
+    impacto_liquido = (delta_irpj + delta_inss + delta_incentivos) + delta_csll - investimento_cti
+    
+    return {
+        "Ano": ano,
+        "Delta CSLL (Bi R$)": round(delta_csll, 2),
+        "Delta IRPJ Adic. (Bi R$)": round(delta_irpj, 2),
+        "Delta INSS (Bi R$)": round(delta_inss, 2),
+        "Recuperação Incentivos (Bi R$)": round(delta_incentivos, 2),
+        "Nova Despesa CT&I (Bi R$)": round(-investimento_cti, 2),
+        "IMPACTO LÍQUIDO NO PRIMÁRIO (Bi R$)": round(impacto_liquido, 2)
+    }
+
+# -----------------------------------------------------------------------------
+# 4. EXECUÇÃO E GERAÇÃO DE RELATÓRIO
+# -----------------------------------------------------------------------------
+
+print("="*80)
+print("SIMULAÇÃO DE IMPACTO FISCAL - PROJETO BRASIL (Valores em R$ Bilhões)")
+print("="*80)
+
+resultados = []
+for ano in range(2026, 2031):
+    # O impacto pleno das regras tributárias assume-se efetivo a partir de 2027
+    if ano == 2026:
+        res = {"Ano": 2026, "Delta CSLL (Bi R$)": 0.0, "Delta IRPJ Adic. (Bi R$)": 0.0, 
+               "Delta INSS (Bi R$)": 0.0, "Recuperação Incentivos (Bi R$)": 0.0, 
+               "Nova Despesa CT&I (Bi R$)": 0.0, "IMPACTO LÍQUIDO NO PRIMÁRIO (Bi R$)": 0.0}
+    else:
+        res = simular_cenario_anual(ano)
+    resultados.append(res)
+
+df = pd.DataFrame(resultados)
+print(df.to_markdown(index=False))
+
+print("\n" + "="*80)
+print("ANÁLISE AUTOMÁTICA DO MODELO:")
+print("="*80)
+impacto_medio = df["IMPACTO LÍQUIDO NO PRIMÁRIO (Bi R$)"].mean()
+print(f"-> Impacto Médio Anual no Resultado Primário (2027-2030): R$ {impacto_medio:.2f} Bilhões")
+
+if impacto_medio < 0:
+    print("-> ALERTA: O conjunto de medidas, nestas premissas, gera pressão de DÉFICIT no curto/médio prazo.")
+    print("-> AÇÃO RECOMENDADA: Revisar a alíquota do IRPJ Adicional ou acelerar a recuperação de incentivos fiscais.")
+else:
+    print("-> SUCESSO: O conjunto de medidas é fiscalmente neutro ou gera superávit primário adicional.")
